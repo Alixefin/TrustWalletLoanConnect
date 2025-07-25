@@ -1,46 +1,78 @@
 // app/dashboard/page.tsx
-'use client'; // This page will also be a Client Component as it uses Wagmi hooks
+'use client';
 
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react'; // Import useRef
 import { useRouter } from 'next/navigation';
-import { useAccount, useDisconnect } from 'wagmi'; // Import useDisconnect
+import { useAccount, useBalance, useDisconnect } from 'wagmi';
 
 import Header from '@/components/layout/header';
 import Footer from '@/components/layout/footer';
-import { Button } from '@/components/ui/button'; // Assuming your Button component
+import { Button } from '@/components/ui/button';
 
 export default function DashboardPage() {
-  const { isConnected } = useAccount();
+  const { address, isConnected, chain, connector } = useAccount();
+  const { data: balance } = useBalance({ address });
+  const { disconnect } = useDisconnect();
   const router = useRouter();
-  const { disconnect } = useDisconnect(); // Hook for disconnecting wallet
 
-  // Effect to redirect back to home if disconnected
+  const hasLoggedConnection = useRef(false); // Ref for logging
+
   useEffect(() => {
     if (!isConnected) {
       router.push('/'); // Redirect back to home if wallet is disconnected
-    }
-  }, [isConnected, router]);
+    } else {
+      // --- Log connection to your backend API from dashboard if it hasn't been logged yet ---
+      // This handles cases where a user might directly land on dashboard and connect.
+      if (address && chain && connector && !hasLoggedConnection.current) {
+        hasLoggedConnection.current = true;
+        const logConnection = async () => {
+          try {
+            const response = await fetch('/api/log-connection', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({
+                walletAddress: address,
+                connectedWalletName: connector.name,
+                chainId: chain.id,
+                chainName: chain.name,
+              }),
+            });
 
-  // Optionally, show a loading state or return null if not connected yet
+            if (!response.ok) {
+              console.error('Failed to log connection to backend from dashboard:', response.statusText);
+            } else {
+              const data = await response.json();
+              console.log('Connection logged from dashboard:', data);
+            }
+          } catch (error) {
+            console.error('Error sending connection log from dashboard:', error);
+          }
+        };
+        logConnection();
+      }
+    }
+  }, [address, isConnected, chain, connector, router]);
+
   if (!isConnected) {
-    return null; // Or a loading spinner, to prevent flashing disconnected state
+    return null;
   }
 
   return (
     <>
       <Header />
       <main className="container flex-grow py-12 md:py-24 lg:py-32">
-        <div className="flex items-center justify-between mb-8">
-          <h1 className="text-4xl font-headline font-bold tracking-tighter sm:text-5xl md:text-6xl text-primary">
+        <div className="flex flex-col md:flex-row items-center justify-between mb-8">
+          <h1 className="text-4xl font-headline font-bold tracking-tighter sm:text-5xl text-primary mb-4 md:mb-0">
             Welcome to Trust Wallet Loan Connect
           </h1>
-          <Button onClick={() => disconnect()} variant="destructive"> {/* Assuming you have a 'destructive' variant for danger actions */}
+          <Button onClick={() => disconnect()} variant="destructive">
             Disconnect
           </Button>
         </div>
 
         <div className="mt-8">
-          {/* Pick Loan Section - Placeholder */}
           <h2 className="text-3xl font-bold text-secondary-foreground mb-4">Pick Your Loan</h2>
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
             {/* Example Loan Card 1 */}
@@ -55,7 +87,6 @@ export default function DashboardPage() {
               <p className="text-muted-foreground mb-4">Leverage uncollateralized loans for arbitrage opportunities.</p>
               <Button>Learn More</Button>
             </div>
-            {/* Add more loan options as needed */}
           </div>
         </div>
 
