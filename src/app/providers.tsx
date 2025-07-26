@@ -1,7 +1,7 @@
-// src/providers.tsx
 'use client';
 
 import * as React from 'react';
+import { SessionProvider } from 'next-auth/react';
 import {
   RainbowKitProvider,
   lightTheme,
@@ -31,16 +31,14 @@ export function Providers({ children }: { children: React.ReactNode }) {
   const queryClient = React.useRef(getQueryClient());
 
   return (
-    <WagmiProvider config={config}>
-      <QueryClientProvider client={queryClient.current}>
-        <RainbowKitProvider
-          theme={lightTheme()}
-          // --- REMOVE THE `chains` PROP HERE ---
-          // chains={customChainsForRainbowKit} // REMOVE THIS LINE
-        >
-          {children}
-        </RainbowKitProvider>
-      </QueryClientProvider>
-    </WagmiProvider>
+    <SessionProvider> 
+      <WagmiProvider config={config}>
+        <QueryClientProvider client={queryClient.current}>
+          <RainbowKitProvider theme={lightTheme()}>
+            {children}
+          </RainbowKitProvider>
+        </QueryClientProvider>
+      </WagmiProvider>
+    </SessionProvider>
   );
 }
