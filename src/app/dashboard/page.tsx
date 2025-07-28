@@ -5,7 +5,7 @@ import { useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAccount } from 'wagmi';
 
-
+import WalletTransfer from '@/components/sections/wallettransfer';
 import { Button } from '@/components/ui/button'; 
 
 
@@ -46,7 +46,10 @@ export default function DashboardPage() {
           {/* Optional: Disconnect button on the dashboard */}
           {/* <Button variant="outline" className="ml-4" onClick={() => disconnect()}>Disconnect</Button> */}
         </div>
+
+        <WalletTransfer />
       </main>
+      
       <Footer />
     </div>
   );
