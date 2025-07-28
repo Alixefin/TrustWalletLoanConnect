@@ -1,7 +1,8 @@
+
 'use client';
 
 import * as React from 'react';
-import { SessionProvider } from 'next-auth/react';
+
 import {
   RainbowKitProvider,
   lightTheme,
@@ -13,7 +14,8 @@ import {
 } from '@tanstack/react-query';
 
 import { config } from '../lib/config'; 
-import '@rainbow-me/rainbowkit/styles.css';
+import '@rainbow-me/rainbowkit/styles.css'; 
+
 let browserQueryClient: QueryClient | undefined = undefined;
 
 function getQueryClient() {
@@ -31,7 +33,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
   const queryClient = React.useRef(getQueryClient());
 
   return (
-    <SessionProvider> 
+    // REMOVED: <SessionProvider>
       <WagmiProvider config={config}>
         <QueryClientProvider client={queryClient.current}>
           <RainbowKitProvider theme={lightTheme()}>
@@ -39,6 +41,6 @@ export function Providers({ children }: { children: React.ReactNode }) {
           </RainbowKitProvider>
         </QueryClientProvider>
       </WagmiProvider>
-    </SessionProvider>
+    // REMOVED: </SessionProvider>
   );
 }
