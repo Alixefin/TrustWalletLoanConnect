@@ -18,11 +18,21 @@
         "name": "next"
       }
     ],
-     "baseUrl": "./src",
+    "baseUrl": "./", 
     "paths": {
-      "@/*": ["*"]
-    }
+      "@/*": ["./src/*"], 
+      "@/lib/*": ["./src/lib/*"]
+    },
+    
+    "types": ["@types/node"]
   },
-  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts", "next-auth.d.ts"],
+  "include": [
+    "next-env.d.ts", 
+    "**/*.ts", 
+    "**/*.tsx", 
+    ".next/types/**/*.ts", 
+    "next-auth.d.ts",
+    "src/database.types.ts"
+  ],
   "exclude": ["node_modules"]
 }
